@@ -28,8 +28,11 @@
     try { email = decodeURIComponent(location.hash.slice(7)).slice(0, 254); } catch (e) { email = ''; }
   }
   var d = document.getElementById('wc');
-  if (plan.indexOf('plan_') === 0 && session.indexOf('ch_') === 0) {
-    d.setAttribute('data-whop-checkout-plan-id', plan);
+  // Payment mode: ?plan=plan_…&session=ch_…  ·  Setup mode (save a card, no charge):
+  // ?session=ch_… only — the engine mounts off the session; the plan attribute is the
+  // scanner hook, so it carries the session id when no plan exists.
+  if (session.indexOf('ch_') === 0 && (plan.indexOf('plan_') === 0 || !plan)) {
+    d.setAttribute('data-whop-checkout-plan-id', plan || session);
     d.setAttribute('data-whop-checkout-session', session);
     d.setAttribute('data-whop-checkout-theme', 'light');
     d.setAttribute('data-whop-checkout-return-url', 'https://yljdthvzchfdaloeivdo.supabase.co/functions/v1/go?pay=done');

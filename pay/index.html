@@ -8,10 +8,11 @@
   :root { color-scheme: light; }
   body { margin:0; background:#FFFFFF; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; }
   main { max-width:560px; margin:0 auto; padding:4px 2px 32px; }
+  #hint { text-align:center; color:#8A8A8A; font-size:14px; padding-top:40vh; }
 </style>
 </head>
 <body>
-<main><div id="wc"></div></main>
+<main><p id="hint">Loading secure checkout&hellip;</p></main>
 <script>
   // Renno's Whop embedded-checkout host page. The app's payment sheet (a WebView) loads
   // this with ?plan=plan_XXX&session=ch_XXX - the session is created server-side by
@@ -19,6 +20,15 @@
   // identical to the hosted page. This page exists because the embed's Apple Pay runs in
   // the PARENT frame, which must live on an Apple-Pay-verified domain (this one).
   // The buyer email rides the URL FRAGMENT (#email=...) so it never reaches any server log.
+  //
+  // MOUNT AFTER LOAD (launch-day outage fix, 2026-09-03): Whop's engine mounts its checkout
+  // iframe synchronously at script eval, and the whole third-party graph behind it
+  // (whop.com behind Cloudflare, Stripe, BasisTheory) then participates in THIS page's load
+  // event, with no watchdog anywhere - so the app's WebView "page loaded" signal could hang
+  // forever and the runner stared at "Opening checkout" for good. Deferring both the target
+  // div and the loader script until AFTER window load closes our load event on the static
+  // page alone (the app's interstitial lifts in under a second) while the form streams in
+  // right behind it. Do not "simplify" this back to a static div + inline loader tag.
   var q = new URLSearchParams(location.search);
   var clean = function (v) { return (v || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 128); };
   var plan = clean(q.get('plan'));
@@ -27,20 +37,33 @@
   if (location.hash.indexOf('#email=') === 0) {
     try { email = decodeURIComponent(location.hash.slice(7)).slice(0, 254); } catch (e) { email = ''; }
   }
-  var d = document.getElementById('wc');
   // Payment mode: ?plan=plan_…&session=ch_…  ·  Setup mode (save a card, no charge):
   // ?session=ch_… only — the engine mounts off the session; the plan attribute is the
   // scanner hook, so it carries the session id when no plan exists.
   if (session.indexOf('ch_') === 0 && (plan.indexOf('plan_') === 0 || !plan)) {
-    d.setAttribute('data-whop-checkout-plan-id', plan || session);
-    d.setAttribute('data-whop-checkout-session', session);
-    d.setAttribute('data-whop-checkout-theme', 'light');
-    d.setAttribute('data-whop-checkout-return-url', 'https://yljdthvzchfdaloeivdo.supabase.co/functions/v1/go?pay=done');
-    if (email.indexOf('@') > 0) d.setAttribute('data-whop-checkout-prefill-email', email);
-    var s = document.createElement('script');
-    s.src = 'https://js.whop.com/static/checkout/loader.js';
-    s.async = true; s.defer = true;
-    document.head.appendChild(s);
+    var mount = function () {
+      var d = document.createElement('div');
+      d.setAttribute('data-whop-checkout-plan-id', plan || session);
+      d.setAttribute('data-whop-checkout-session', session);
+      d.setAttribute('data-whop-checkout-theme', 'light');
+      d.setAttribute('data-whop-checkout-return-url', 'https://yljdthvzchfdaloeivdo.supabase.co/functions/v1/go?pay=done');
+      if (email.indexOf('@') > 0) d.setAttribute('data-whop-checkout-prefill-email', email);
+      var main = document.getElementsByTagName('main')[0];
+      main.appendChild(d);
+      // The loader goes in AFTER the div exists: the engine scans for the data attributes
+      // at eval time, so it mounts immediately on arrival - no MutationObserver dependency.
+      var s = document.createElement('script');
+      s.src = 'https://js.whop.com/static/checkout/loader.js';
+      s.async = true; s.defer = true;
+      document.head.appendChild(s);
+      // Swap the hint out the moment the engine mounts its iframe into the div.
+      var hint = document.getElementById('hint');
+      if (hint) {
+        new MutationObserver(function (m, o) { hint.remove(); o.disconnect(); }).observe(d, { childList: true });
+      }
+    };
+    if (document.readyState === 'complete') { mount(); }
+    else { window.addEventListener('load', mount); }
   } else {
     document.body.innerHTML = '<p style="text-align:center;color:#8A8A8A;padding-top:40vh">Bad checkout link</p>';
   }

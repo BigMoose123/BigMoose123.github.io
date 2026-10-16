@@ -12,23 +12,27 @@
 </style>
 </head>
 <body>
-<main><p id="hint">Loading secure checkout&hellip;</p></main>
+<main><p id="hint">Loading secure checkout&hellip;</p><div id="checkout"></div></main>
 <script>
-  // Renno's Whop embedded-checkout host page. The app's payment sheet (a WebView) loads
-  // this with ?plan=plan_XXX&session=ch_XXX - the session is created server-side by
-  // create-entry-purchase and carries the entry metadata, so the payment webhook flow is
-  // identical to the hosted page. This page exists because the embed's Apple Pay runs in
-  // the PARENT frame, which must live on an Apple-Pay-verified domain (this one).
-  // The buyer email rides the URL FRAGMENT (#email=...) so it never reaches any server log.
+  // Renno's Whop checkout host page. The app's payment sheet (a WebView) loads this with
+  // ?plan=plan_XXX&session=ch_XXX. The ch_ is a checkout configuration created server-side
+  // by create-entry-purchase and carries the entry metadata, so the payment webhook flow is
+  // identical to the hosted page. Setup mode (save a card, no charge) sends ?session=ch_XXX
+  // alone. The buyer email rides the URL FRAGMENT (#email=...) so it never reaches any log.
   //
-  // MOUNT AFTER LOAD (launch-day outage fix, 2026-09-03): Whop's engine mounts its checkout
-  // iframe synchronously at script eval, and the whole third-party graph behind it
-  // (whop.com behind Cloudflare, Stripe, BasisTheory) then participates in THIS page's load
-  // event, with no watchdog anywhere - so the app's WebView "page loaded" signal could hang
-  // forever and the runner stared at "Opening checkout" for good. Deferring both the target
-  // div and the loader script until AFTER window load closes our load event on the static
-  // page alone (the app's interstitial lifts in under a second) while the form streams in
-  // right behind it. Do not "simplify" this back to a static div + inline loader tag.
+  // WHOP ELEMENTS (2026-10-15): Whop retired the legacy data-attribute embed
+  // (js.whop.com/static/checkout/loader.js) on 2026-10-21. Elements mints the checkout
+  // session from our configuration in the browser; no API key lives on this page. A finished
+  // checkout navigates this tab to returnUrl with payment|setup and
+  // status=succeeded|failed|canceled appended; the app intercepts that go?pay=done navigation
+  // (WhopEmbeddedCheckoutHost) and the membership poll, not this URL, decides "paid".
+  //
+  // MOUNT AFTER LOAD (launch-day outage fix, 2026-09-03): Whop's third-party graph (whop.com
+  // behind Cloudflare, Stripe, card vaults) must not participate in THIS page's load event,
+  // or the app's WebView "page loaded" signal can hang and the runner stares at "Opening
+  // checkout" for good. The Elements script is injected only after window load. Do not
+  // "simplify" this back to a static script tag.
+  var RETURN_URL = 'https://yljdthvzchfdaloeivdo.supabase.co/functions/v1/go?pay=done';
   var q = new URLSearchParams(location.search);
   var clean = function (v) { return (v || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 128); };
   var plan = clean(q.get('plan'));
@@ -37,33 +41,38 @@
   if (location.hash.indexOf('#email=') === 0) {
     try { email = decodeURIComponent(location.hash.slice(7)).slice(0, 254); } catch (e) { email = ''; }
   }
-  // Payment mode: ?plan=plan_…&session=ch_…  ·  Setup mode (save a card, no charge):
-  // ?session=ch_… only — the engine mounts off the session; the plan attribute is the
-  // scanner hook, so it carries the session id when no plan exists.
+  var hint = document.getElementById('hint');
+
   if (session.indexOf('ch_') === 0 && (plan.indexOf('plan_') === 0 || !plan)) {
     var mount = function () {
-      var d = document.createElement('div');
-      d.setAttribute('data-whop-checkout-plan-id', plan || session);
-      d.setAttribute('data-whop-checkout-session', session);
-      d.setAttribute('data-whop-checkout-theme', 'light');
-      d.setAttribute('data-whop-checkout-return-url', 'https://yljdthvzchfdaloeivdo.supabase.co/functions/v1/go?pay=done');
-      if (email.indexOf('@') > 0) d.setAttribute('data-whop-checkout-prefill-email', email);
-      var main = document.getElementsByTagName('main')[0];
-      main.appendChild(d);
-      // The loader goes in AFTER the div exists: the engine scans for the data attributes
-      // at eval time, so it mounts immediately on arrival - no MutationObserver dependency.
-      var s = document.createElement('script');
-      s.src = 'https://js.whop.com/static/checkout/loader.js';
-      s.async = true; s.defer = true;
-      document.head.appendChild(s);
-      // Swap the hint out the moment the engine mounts its iframe into the div.
-      var hint = document.getElementById('hint');
-      if (hint) {
-        new MutationObserver(function (m, o) { hint.remove(); o.disconnect(); }).observe(d, { childList: true });
-      }
+      var whop = window.WhopElements({ appearance: { theme: { appearance: 'light', accentColor: 'orange' } } });
+      var checkout = whop.checkout.create({
+        checkoutConfiguration: session,
+        returnUrl: RETURN_URL,
+        onComplete: function () {
+          // Elements navigates to returnUrl right after this. Backstop only: if that
+          // navigation never happens, leave anyway so the sheet closes onto the poll.
+          setTimeout(function () { location.replace(RETURN_URL + '&status=succeeded'); }, 4000);
+        },
+      });
+      var props = {
+        onReady: function () { if (hint) hint.remove(); },
+        onError: function () { if (hint) hint.textContent = 'Checkout could not load. Close this and try again.'; },
+      };
+      if (email.indexOf('@') > 0) props.buyerEmail = email;
+      checkout.create('checkout', props).mount('#checkout');
     };
-    if (document.readyState === 'complete') { mount(); }
-    else { window.addEventListener('load', mount); }
+    var inject = function () {
+      var s = document.createElement('script');
+      s.src = 'https://cdn.whop.com/elements/amber/elements.js';
+      s.setAttribute('data-whop-elements', '');
+      s.async = true;
+      s.onload = mount;
+      s.onerror = function () { if (hint) hint.textContent = 'Checkout could not load. Close this and try again.'; };
+      document.head.appendChild(s);
+    };
+    if (document.readyState === 'complete') { inject(); }
+    else { window.addEventListener('load', inject); }
   } else {
     document.body.innerHTML = '<p style="text-align:center;color:#8A8A8A;padding-top:40vh">Bad checkout link</p>';
   }

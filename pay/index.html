@@ -32,6 +32,15 @@
   // or the app's WebView "page loaded" signal can hang and the runner stares at "Opening
   // checkout" for good. The Elements script is injected only after window load. Do not
   // "simplify" this back to a static script tag.
+  //
+  // ONE TICK LATER, NOT INSIDE THE LOAD HANDLER (2026-11-12): WebKit holds didFinishNavigation
+  // and estimatedProgress=1 until every load STARTED inside the load handler finishes, and
+  // every frame that script creates. Injecting synchronously in the handler therefore kept
+  // Whop's whole graph (elements.js, its tracking scripts, its iframes, the card vault,
+  // PayPal, Apple Pay) inside the app's 12 s paint timer, and runners on slow connections
+  // were sent to Whop's hosted page (1-4% of in-app checkouts). setTimeout(inject, 0) runs
+  // after WebKit has reported the page finished (WKWebView probe: finish 0.45 s instead of
+  // 8.4 s). The trade: a stall INSIDE Whop's form now shows the hint below, not the fallback.
   var RETURN_URL = 'https://yljdthvzchfdaloeivdo.supabase.co/functions/v1/go?pay=done';
   var q = new URLSearchParams(location.search);
   var clean = function (v) { return (v || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 128); };
@@ -71,8 +80,9 @@
       s.onerror = function () { if (hint) hint.textContent = 'Checkout could not load. Close this and try again.'; };
       document.head.appendChild(s);
     };
-    if (document.readyState === 'complete') { inject(); }
-    else { window.addEventListener('load', inject); }
+    var injectAfterFinish = function () { setTimeout(inject, 0); };
+    if (document.readyState === 'complete') { injectAfterFinish(); }
+    else { window.addEventListener('load', injectAfterFinish); }
   } else {
     document.body.innerHTML = '<p style="text-align:center;color:#8A8A8A;padding-top:40vh">Bad checkout link</p>';
   }

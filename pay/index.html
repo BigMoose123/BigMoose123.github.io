@@ -40,7 +40,16 @@
   // PayPal, Apple Pay) inside the app's 12 s paint timer, and runners on slow connections
   // were sent to Whop's hosted page (1-4% of in-app checkouts). setTimeout(inject, 0) runs
   // after WebKit has reported the page finished (WKWebView probe: finish 0.45 s instead of
-  // 8.4 s). The trade: a stall INSIDE Whop's form now shows the hint below, not the fallback.
+  // 8.4 s). So the app's timer no longer covers Whop's form, and this page owns that backstop:
+  //
+  // FORM-READY FALLBACK (2026-11-12): if Elements has not called onReady within FORM_READY_MS of
+  // this script running, or reports an error (or its script fails to load) before then, the
+  // page navigates THIS tab to Whop's hosted checkout for the same ch_ session. Same session, so
+  // no double-charge surface (nothing could be paid on a form that never rendered); the hosted
+  // page's redirect_url is the same go?pay=done the app's WebView already intercepts, and every
+  // installed build allows a top-frame https navigation. ?renno_fallback=1 lets the app log it
+  // (embedded_checkout_fallback reason=form_not_ready); Whop ignores the parameter. Never after
+  // onReady or once focus has moved into Whop's frame: a runner mid-entry is never yanked.
   var RETURN_URL = 'https://yljdthvzchfdaloeivdo.supabase.co/functions/v1/go?pay=done';
   var q = new URLSearchParams(location.search);
   var clean = function (v) { return (v || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 128); };
@@ -51,8 +60,28 @@
     try { email = decodeURIComponent(location.hash.slice(7)).slice(0, 254); } catch (e) { email = ''; }
   }
   var hint = document.getElementById('hint');
+  var FORM_READY_MS = 15000;
+  var ready = false;
+  var fellBack = false;
 
   if (session.indexOf('ch_') === 0 && (plan.indexOf('plan_') === 0 || !plan)) {
+    var fallBack = function () {
+      if (ready || fellBack) return;
+      fellBack = true;
+      if (hint) hint.textContent = 'Opening checkout\u2026';
+      location.replace('https://whop.com/checkout/' + session + '?renno_fallback=1');
+    };
+    setTimeout(fallBack, FORM_READY_MS);
+    // Focus moving INTO Whop's frame (a tap on a field) means the runner is using the form,
+    // whatever onReady says: never navigate away after that. A bare blur is not enough: the page
+    // also blurs when the app goes to the background or the window loses focus (a WKWebView
+    // probe marked a never-loaded form "in use" that way), so check where focus went.
+    window.addEventListener('blur', function () {
+      setTimeout(function () {
+        var el = document.activeElement;
+        if (el && el.tagName === 'IFRAME') ready = true;
+      }, 0);
+    });
     var mount = function () {
       var whop = window.WhopElements({ appearance: { theme: { appearance: 'light', accentColor: 'orange' } } });
       var checkout = whop.checkout.create({
@@ -65,8 +94,11 @@
         },
       });
       var props = {
-        onReady: function () { if (hint) hint.remove(); },
-        onError: function () { if (hint) hint.textContent = 'Checkout could not load. Close this and try again.'; },
+        onReady: function () { ready = true; if (hint) hint.remove(); },
+        onError: function () {
+          if (!ready) { fallBack(); return; }
+          if (hint) hint.textContent = 'Checkout could not load. Close this and try again.';
+        },
       };
       if (email.indexOf('@') > 0) props.buyerEmail = email;
       checkout.create('checkout', props).mount('#checkout');
@@ -77,7 +109,7 @@
       s.setAttribute('data-whop-elements', '');
       s.async = true;
       s.onload = mount;
-      s.onerror = function () { if (hint) hint.textContent = 'Checkout could not load. Close this and try again.'; };
+      s.onerror = fallBack;
       document.head.appendChild(s);
     };
     var injectAfterFinish = function () { setTimeout(inject, 0); };
